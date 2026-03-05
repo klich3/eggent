@@ -897,9 +897,10 @@ export async function getProjectFiles(
   try {
     const entries = await fs.readdir(targetDir, { withFileTypes: true });
     const files = [];
+    const HIDDEN_NAMES = new Set([".meta", ".venv", "venv"]);
 
     for (const entry of entries) {
-      if (entry.name === ".meta") continue; // hide metadata
+      if (HIDDEN_NAMES.has(entry.name)) continue; // hide internal metadata and virtualenvs
       const stat = await fs.stat(path.join(targetDir, entry.name));
       files.push({
         name: entry.name,
