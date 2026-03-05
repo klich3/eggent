@@ -16,7 +16,7 @@ Execute code in a specified runtime environment. The code runs on the user's mac
 4. **Check prerequisites** — verify packages are installed before importing
 5. **Use sessions wisely** — session 0 is the default; reuse the same session to keep terminal working-directory state between calls
 6. **Prefer dedicated file tools first** — use `read_text_file`, `read_pdf_file`, `write_text_file`, and `copy_file` for common file tasks; use `code_execution` only when those tools are insufficient
-7. **Auto-resolve missing Python deps** — if you see `ModuleNotFoundError`, run `python3 -m pip install <package>` in `terminal`, then rerun Python code
+7. **Auto-resolve missing Python deps** — if you see `ModuleNotFoundError`, call `install_packages` with `kind=python` and retry. If pip reports `externally-managed-environment`, install into a project-local virtualenv (`python3 -m venv .venv` + `.venv/bin/python -m pip install <package>`).
 8. **Auto-resolve missing Node deps** — if you see `Cannot find module '<name>'`, install it via `install_packages` (`kind=node`, package `<name>`) or package manager command, then rerun Node code once
 9. **Install system packages carefully** — for Debian/Ubuntu, use `apt-get`/`apt`; add `sudo` only when required and available
 10. **Use background mode for long jobs** — set `background=true` or `yield_ms` and then use the `process` tool to poll/log/kill
@@ -43,7 +43,7 @@ Do not stop after first failure for these classes:
 ## Examples
 
 ### Install a package then use it
-First execution: `python3 -m pip install requests` (runtime: terminal)
+First execution: `install_packages(kind="python", packages=["requests"])`
 Second execution: `import requests; r = requests.get('...'); print(r.json())` (runtime: python)
 
 ### Install a system package

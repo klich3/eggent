@@ -391,13 +391,15 @@ function prepareExecution(params: {
   cwd: string;
 }): PreparedExecution {
   if (params.runtime === "python") {
+    const pythonCommand = resolvePythonCommand(params.cwd);
+    const pythonLabel = path.basename(pythonCommand) === "python3" ? "python3" : pythonCommand;
     return {
       runtime: "python",
-      command: "python3",
+      command: pythonCommand,
       args: ["-c", params.code],
       cwd: params.cwd,
-      env: { ...process.env, PYTHONUNBUFFERED: "1" },
-      commandPreview: `python3 -c ${previewText(params.code)}`,
+      env: buildPythonEnv(params.cwd),
+      commandPreview: `${pythonLabel} -c ${previewText(params.code)}`,
     };
   }
 
@@ -441,6 +443,50 @@ function prepareExecution(params: {
     terminalMarker: marker,
     terminalState,
   };
+}
+
+function buildPythonEnv(cwd: string): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = { ...process.env, PYTHONUNBUFFERED: "1" };
+  const venvDir = resolveProjectVenvDir(cwd);
+  if (!venvDir) {
+    return env;
+  }
+
+  const currentPath = env.PATH || "";
+  env.VIRTUAL_ENV = venvDir;
+  env.PATH = [path.join(venvDir, "bin"), currentPath].filter(Boolean).join(path.delimiter);
+  return env;
+}
+
+function resolvePythonCommand(cwd: string): string {
+  const venvPython = resolveProjectVenvPython(cwd);
+  if (venvPython) {
+    return venvPython;
+  }
+
+  return "python3";
+}
+
+function resolveProjectVenvDir(cwd: string): string | null {
+  const candidates = [".venv", "venv"];
+  for (const name of candidates) {
+    const candidateDir = path.join(cwd, name);
+    const candidatePython = path.join(candidateDir, "bin", "python");
+    if (fs.existsSync(candidatePython)) {
+      return candidateDir;
+    }
+  }
+  return null;
+}
+
+function resolveProjectVenvPython(cwd: string): string | null {
+  const venvDir = resolveProjectVenvDir(cwd);
+  if (!venvDir) {
+    return null;
+  }
+
+  const pythonBin = path.join(venvDir, "bin", "python");
+  return fs.existsSync(pythonBin) ? pythonBin : null;
 }
 
 function startManagedExecution(params: {

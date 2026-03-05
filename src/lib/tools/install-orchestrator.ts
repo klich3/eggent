@@ -234,6 +234,21 @@ function buildPythonPlans(params: {
         },
       ],
     });
+    plans.push({
+      manager: "pip-venv",
+      steps: [
+        {
+          manager: "pip-venv",
+          argv: ["python3", "-m", "venv", ".venv"],
+          cwd: params.cwd,
+        },
+        {
+          manager: "pip-venv",
+          argv: [path.join(".venv", "bin", "python"), "-m", "pip", "install", ...params.packages],
+          cwd: params.cwd,
+        },
+      ],
+    });
   } else if (commandExists("python")) {
     plans.push({
       manager: "pip",
@@ -241,6 +256,21 @@ function buildPythonPlans(params: {
         {
           manager: "pip",
           argv: ["python", "-m", "pip", "install", ...params.packages],
+          cwd: params.cwd,
+        },
+      ],
+    });
+    plans.push({
+      manager: "pip-venv",
+      steps: [
+        {
+          manager: "pip-venv",
+          argv: ["python", "-m", "venv", ".venv"],
+          cwd: params.cwd,
+        },
+        {
+          manager: "pip-venv",
+          argv: [path.join(".venv", "bin", "python"), "-m", "pip", "install", ...params.packages],
           cwd: params.cwd,
         },
       ],
