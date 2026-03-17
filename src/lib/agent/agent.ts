@@ -726,6 +726,48 @@ function formatStreamErrorForUser(errorMessage: string): string {
   return compact.length > 220 ? `${compact.slice(0, 220)}...` : compact;
 }
 
+function normalizeInvisibleChars(text: string): string {
+  return text.replace(/[\u200B-\u200D\u2060\uFEFF]/g, "");
+}
+
+function hasVisibleText(text: string): boolean {
+  return normalizeInvisibleChars(text).trim().length > 0;
+}
+
+function buildMissingFinalResponseFallback(options: {
+  responseMessages: ModelMessage[];
+  streamErrorMessage: string;
+}): string {
+  const { responseMessages, streamErrorMessage } = options;
+  const lastToolResult = getLastNonResponseToolResult(responseMessages);
+  const streamErrorText = formatStreamErrorForUser(streamErrorMessage);
+  const fallbackLines: string[] = [
+    "Tool execution finished, but I could not produce a final response for this turn.",
+  ];
+
+  if (streamErrorText) {
+    fallbackLines.push(`Reason: ${streamErrorText}`);
+  }
+
+  if (lastToolResult?.toolName) {
+    fallbackLines.push(`Last tool: \`${lastToolResult.toolName}\``);
+  }
+
+  if (lastToolResult?.text) {
+    fallbackLines.push(
+      [
+        "Last tool output (truncated):",
+        "```text",
+        truncateForFallback(lastToolResult.text, 1200),
+        "```",
+      ].join("\n")
+    );
+  }
+
+  fallbackLines.push("Send `continue` and I will finish the answer.");
+  return fallbackLines.join("\n\n");
+}
+
 function shouldAutoContinueAssistant(
   text: string,
   finishReason?: string
@@ -830,7 +872,91 @@ export async function runAgent(options: {
     label: "LLM Request (stream)",
   });
 
+  const userMessageRecord: ChatMessage = {
+    id: crypto.randomUUID(),
+    role: "user",
+    content: options.userMessage,
+    createdAt: new Date().toISOString(),
+  };
+
+  async function ensureUserMessageSaved() {
+    try {
+      const chat = await getChat(options.chatId);
+      if (!chat) return;
+      const alreadySaved = chat.messages.some((msg) => msg.id === userMessageRecord.id);
+      if (alreadySaved) return;
+
+      chat.messages.push(userMessageRecord);
+      chat.updatedAt = userMessageRecord.createdAt;
+      const userMessageCount = chat.messages.filter((m) => m.role === "user").length;
+      if (userMessageCount === 1 && chat.title === "New Chat") {
+        chat.title =
+          options.userMessage.slice(0, 60) +
+          (options.userMessage.length > 60 ? "..." : "");
+      }
+      await saveChat(chat);
+    } catch {
+      // Non-critical, don't fail the response
+    }
+  }
+
+  async function persistAssistantTurn(payload: {
+    responseMessages: ModelMessage[];
+    continuationText?: string;
+    fallbackText?: string;
+  }): Promise<"none" | "continued" | "fallback" | "finished"> {
+    const { responseMessages, continuationText = "", fallbackText = "" } = payload;
+    try {
+      const chat = await getChat(options.chatId);
+      if (!chat) return "none";
+
+      if (!chat.messages.some((msg) => msg.id === userMessageRecord.id)) {
+        chat.messages.push(userMessageRecord);
+      }
+
+      const now = new Date().toISOString();
+      for (const msg of responseMessages) {
+        chat.messages.push(...convertModelMessageToChatMessages(msg, now));
+      }
+      if (continuationText || fallbackText) {
+        chat.messages.push({
+          id: crypto.randomUUID(),
+          role: "assistant",
+          content: continuationText || fallbackText,
+          createdAt: now,
+        });
+      }
+
+      chat.updatedAt = now;
+      await saveChat(chat);
+
+      if (continuationText) return "continued";
+      if (fallbackText) return "fallback";
+      return "finished";
+    } catch {
+      return "none";
+    }
+  }
+
+  await ensureUserMessageSaved();
+
   let streamErrorMessage = "";
+  let streamFinished = false;
+  let persistedByOnError = false;
+  let onErrorPersistScheduled = false;
+  let latestStepResponseMessages: ModelMessage[] = [];
+  let lastFinishReason: string | undefined;
+  let mcpCleanedUp = false;
+
+  async function cleanupMcpIfNeeded() {
+    if (!mcpCleanup || mcpCleanedUp) return;
+    mcpCleanedUp = true;
+    try {
+      await mcpCleanup();
+    } catch {
+      // non-critical
+    }
+  }
 
   // Run the agent with streaming
   const result = streamText({
@@ -842,11 +968,86 @@ export async function runAgent(options: {
     stopWhen: [stepCountIs(MAX_TOOL_STEPS_PER_TURN), hasToolCall("response")],
     temperature: settings.chatModel.temperature ?? 0.7,
     maxOutputTokens: settings.chatModel.maxTokens ?? 4096,
+    onStepFinish: async (step) => {
+      latestStepResponseMessages = step.response.messages;
+      lastFinishReason = step.finishReason;
+    },
+    onAbort: async () => {
+      if (streamFinished || persistedByOnError) return;
+      persistedByOnError = true;
+      streamErrorMessage = streamErrorMessage || "The stream was aborted before a final response.";
+
+      await cleanupMcpIfNeeded();
+
+      const responseMessages = latestStepResponseMessages;
+      const responseToolText = getLastResponseToolText(responseMessages).trim();
+      const lastAssistantText = getLastAssistantText(responseMessages);
+      const hasFinalText = hasVisibleText(lastAssistantText) || hasVisibleText(responseToolText);
+
+      const fallbackText = hasFinalText
+        ? ""
+        : buildMissingFinalResponseFallback({
+            responseMessages,
+            streamErrorMessage,
+          });
+
+      const persistResult = await persistAssistantTurn({
+        responseMessages,
+        fallbackText,
+      });
+
+      publishUiSyncEvent({
+        topic: "chat",
+        projectId: options.projectId ?? null,
+        chatId: options.chatId,
+        reason:
+          persistResult === "fallback"
+            ? "agent_turn_stream_abort_fallback"
+            : "agent_turn_stream_abort_partial_saved",
+      });
+    },
     onError: async ({ error }) => {
       streamErrorMessage = error instanceof Error ? error.message : String(error);
       console.error("Agent stream error:", error);
+
+      if (onErrorPersistScheduled) return;
+      onErrorPersistScheduled = true;
+
+      setTimeout(async () => {
+        if (streamFinished || persistedByOnError) return;
+        persistedByOnError = true;
+        await cleanupMcpIfNeeded();
+
+        const responseMessages = latestStepResponseMessages;
+        const responseToolText = getLastResponseToolText(responseMessages).trim();
+        const lastAssistantText = getLastAssistantText(responseMessages);
+        const hasFinalText = hasVisibleText(lastAssistantText) || hasVisibleText(responseToolText);
+
+        const fallbackText = hasFinalText
+          ? ""
+          : buildMissingFinalResponseFallback({
+              responseMessages,
+              streamErrorMessage,
+            });
+
+        const persistResult = await persistAssistantTurn({
+          responseMessages,
+          fallbackText,
+        });
+
+        publishUiSyncEvent({
+          topic: "chat",
+          projectId: options.projectId ?? null,
+          chatId: options.chatId,
+          reason:
+            persistResult === "fallback"
+              ? "agent_turn_stream_error_fallback"
+              : "agent_turn_stream_error_partial_saved",
+        });
+      }, 1200);
     },
     onFinish: async (event) => {
+      streamFinished = true;
       const finishReason =
         typeof (event as unknown as { finishReason?: unknown }).finishReason === "string"
           ? ((event as unknown as { finishReason?: string }).finishReason as string)
@@ -884,85 +1085,23 @@ export async function runAgent(options: {
       }
 
       if (
-        !lastAssistantText.trim() &&
-        !responseToolText &&
-        !continuationText.trim()
+        !hasVisibleText(lastAssistantText) &&
+        !hasVisibleText(responseToolText) &&
+        !hasVisibleText(continuationText)
       ) {
-        const lastToolResult = getLastNonResponseToolResult(responseMessages);
-        const streamErrorText = formatStreamErrorForUser(streamErrorMessage);
-        const fallbackLines: string[] = [
-          "Tool execution finished, but I could not produce a final response for this turn.",
-        ];
-
-        if (streamErrorText) {
-          fallbackLines.push(`Reason: ${streamErrorText}`);
-        }
-
-        if (lastToolResult?.toolName) {
-          fallbackLines.push(`Last tool: \`${lastToolResult.toolName}\``);
-        }
-
-        if (lastToolResult?.text) {
-          fallbackLines.push(
-            [
-              "Last tool output (truncated):",
-              "```text",
-              truncateForFallback(lastToolResult.text, 1200),
-              "```",
-            ].join("\n")
-          );
-        }
-
-        fallbackLines.push("Send `continue` and I will finish the answer.");
-        fallbackText = fallbackLines.join("\n\n");
+        fallbackText = buildMissingFinalResponseFallback({
+          responseMessages,
+          streamErrorMessage,
+        });
       }
 
-      if (mcpCleanup) {
-        try {
-          await mcpCleanup();
-        } catch {
-          // non-critical
-        }
-      }
-      // Save to chat history (including tool calls and results)
-      try {
-        const chat = await getChat(options.chatId);
-        if (chat) {
-          const now = new Date().toISOString();
-
-          // Add user message
-          chat.messages.push({
-            id: crypto.randomUUID(),
-            role: "user",
-            content: options.userMessage,
-            createdAt: now,
-          });
-
-          // Add all response messages (assistant + tool calls + tool results)
-          for (const msg of responseMessages) {
-            chat.messages.push(...convertModelMessageToChatMessages(msg, now));
-          }
-          if (continuationText || fallbackText) {
-            chat.messages.push({
-              id: crypto.randomUUID(),
-              role: "assistant",
-              content: continuationText || fallbackText,
-              createdAt: now,
-            });
-          }
-
-          chat.updatedAt = now;
-          // Auto-title from first user message (count user messages, not total)
-          const userMessageCount = chat.messages.filter(m => m.role === "user").length;
-          if (userMessageCount === 1 && chat.title === "New Chat") {
-            chat.title =
-              options.userMessage.slice(0, 60) +
-              (options.userMessage.length > 60 ? "..." : "");
-          }
-          await saveChat(chat);
-        }
-      } catch {
-        // Non-critical, don't fail the response
+      await cleanupMcpIfNeeded();
+      if (!persistedByOnError) {
+        await persistAssistantTurn({
+          responseMessages,
+          continuationText,
+          fallbackText,
+        });
       }
 
       publishUiSyncEvent({
@@ -973,6 +1112,8 @@ export async function runAgent(options: {
           ? "agent_turn_auto_continued"
           : fallbackText
             ? "agent_turn_fallback_response"
+            : lastFinishReason === "error"
+              ? "agent_turn_finished_with_error"
             : "agent_turn_finished",
       });
       publishUiSyncEvent({

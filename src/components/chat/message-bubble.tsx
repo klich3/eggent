@@ -11,6 +11,11 @@ interface MessageBubbleProps {
   message: UIMessage;
 }
 
+function normalizeVisibleText(text: string): string {
+  const noInvisible = text.replace(/[\u200B-\u200D\u2060\uFEFF]/g, "");
+  return noInvisible.trim();
+}
+
 export function MessageBubble({ message }: MessageBubbleProps) {
   const isUser = message.role === "user";
 
@@ -52,7 +57,8 @@ export function MessageBubble({ message }: MessageBubbleProps) {
     .filter(Boolean)
     .join("\n\n");
 
-  const visibleTextContent = textContent || responseToolText;
+  const visibleTextContent =
+    normalizeVisibleText(textContent) || normalizeVisibleText(responseToolText);
 
   return (
     <div className="space-y-1">
