@@ -1,6 +1,15 @@
 ---
 name: sendforsign
-description: Use this skill whenever the user mentions "sendforsign", "send for sign", "SFS", or wants to work with document signing via API. Also use it when the user wants to create, send, sign, or manage contracts, templates, recipients, placeholders, webhooks, or clients through the SendForSign platform — even if they don't say "sendforsign" explicitly. Covers all operations: creating and sending contracts for signature, managing templates, setting up webhooks, downloading PDFs, uploading documents, managing clients and users. Trigger for Russian-language requests too: "создай контракт", "отправь на подпись", "шаблон для договора", etc.
+description: >-
+  Use this skill whenever the user mentions "sendforsign", "send for sign",
+  "SFS", or wants to work with document signing via API. Also use it when the
+  user wants to create, send, sign, or manage contracts, templates, recipients,
+  placeholders, webhooks, or clients through the SendForSign platform - even if
+  they don't say "sendforsign" explicitly. Covers all operations: creating and
+  sending contracts for signature, managing templates, setting up webhooks,
+  downloading PDFs, uploading documents, managing clients and users. Trigger for
+  Russian-language requests too: "создай контракт", "отправь на подпись",
+  "шаблон для договора", etc.
 version: 1.0.0
 ---
 
