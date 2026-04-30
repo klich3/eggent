@@ -259,7 +259,11 @@ function isLocalhostUrl(url: string): boolean {
   if (!url) return true;
   try {
     const parsed = new URL(url);
-    const hostname = parsed.hostname.toLowerCase();
+    if (parsed.protocol !== "https:") {
+      return true;
+    }
+
+    const hostname = parsed.hostname.toLowerCase().replace(/^\[|\]$/g, "");
     if (hostname === "localhost" || hostname === "::1" || hostname.endsWith(".local")) {
       return true;
     }
